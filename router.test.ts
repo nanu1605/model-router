@@ -1,9 +1,10 @@
 import { expect, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 
 // Nothing sits beneath the plugin: this hook stands for the engine. It resolves
 // a spawn to the model it was handed, or to `resolved` when the test forces one.
 let resolved: string | undefined
-const engine = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+const engine = (on: Parameters<TestBody>[1]) => {
   resolved = undefined
   on('agent.spawn', (_, e) => ({ model: resolved ?? e.model ?? 'inherit', agentId: `a${e.description}` }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
