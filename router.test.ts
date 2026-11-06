@@ -1,40 +1,98 @@
 import { expect, test } from 'claude-code/testing'
 
-test('every spawn gets one of haiku, sonnet, opus', async ($, on) => {
-  // Nothing sits beneath the plugin: this hook stands for the engine and
-  // echoes the model the plugin handed down.
-  on('agent.spawn', (_, e) => ({ model: e.model ?? 'inherit', agentId: 'a1' }))
+// Nothing sits beneath the plugin: this hook stands for the engine. It resolves
+// a spawn to the model it was handed, or to `resolved` when the test forces one.
+let resolved: string | undefined
+const engine = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  resolved = undefined
+  on('agent.spawn', (_, e) => ({ model: resolved ?? e.model ?? 'inherit', agentId: `a${e.description}` }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'route' } }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+}
+
+const end = (agentId: string, model: string, reason = 'answer') =>
+  ({
+    agentId,
+    reason,
+    answer: '',
+    durationMs: 2000,
+    isAborted: reason === 'aborted',
+    turnId: `t${agentId}`,
+    usage: { input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 500, model },
+  }) as never
+
+const route = async ($: { command: { run: (e: never) => Promise<{ text?: string }> } }, args = '') =>
+  (await $.command.run({ command: 'route', args, origin: { kind: 'composer' } } as never)).text ?? ''
+
+test('the main model must pick a tier; a valid pick goes on as given', async ($, on) => {
+  engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const spawn = (input: object) => $.agent.spawn({ prompt: 'x', description: '1', ...input } as never)
 
-  const route = async (input: Parameters<typeof $.agent.spawn>[0]) =>
-    (await $.agent.spawn(input)).model
+  expect((await spawn({})).deny).toContain('model-router: this Agent call has no model')
+  expect((await spawn({ model: 'fable' })).deny).toContain('haiku')
+  expect((await spawn({ model: 'inherit' })).deny).toBeDefined()
 
-  // The main model's valid pick stands, full ids become aliases.
-  expect(await route({ prompt: 'x', model: 'opus' })).toBe('opus')
-  expect(await route({ prompt: 'x', model: 'claude-haiku-5-5' })).toBe('haiku')
-  // No pick, or one outside the three: the fallback decides.
-  expect(await route({ prompt: 'x', subagentType: 'Explore' })).toBe('haiku')
-  expect(await route({ prompt: 'x', subagentType: 'Explore', model: 'fable' })).toBe('haiku')
-  expect(await route({ prompt: 'x', description: 'Design auth architecture' })).toBe('opus')
-  expect(await route({ prompt: 'x', description: 'Find config files' })).toBe('haiku')
-  expect(await route({ prompt: 'x', description: 'Add retry to client' })).toBe('sonnet')
+  expect((await spawn({ model: 'haiku' })).model).toBe('haiku')
+  expect((await spawn({ model: 'opus[1m]' })).model).toBe('opus[1m]')
+  expect((await spawn({ model: 'claude-sonnet-4-5' })).model).toBe('claude-sonnet-4-5')
 })
 
-test('a workflow agent keeps the session model unless its script names a tier', async ($, on) => {
-  on('agent.spawn', (_, e) => ({ model: e.model ?? 'inherit', agentId: 'a1' }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-
-  // `workflow` is stamped by the engine for a script's agent(); the test hands it over.
+test('a workflow agent goes on untouched', async ($, on) => {
+  engine(on)
   const workflow = { runId: 'wf_test', agentIndex: 1 }
-  const route = async (input: object) =>
+  const spawn = async (input: object) =>
     (await $.agent.spawn({ prompt: 'x', workflow, ...input } as never)).model
 
-  // Fallback keywords ("Find") would send this to haiku for any other agent.
-  expect(await route({ prompt: 'Find the config files' })).toBe('inherit')
-  expect(await route({ model: 'fable' })).toBe('fable')
-  expect(await route({ model: 'claude-opus-5-5' })).toBe('opus')
+  expect(await spawn({})).toBe('inherit')
+  expect(await spawn({ model: 'claude-opus-5-5' })).toBe('claude-opus-5-5')
+})
+
+test('/route reports usage, outcome and the model that actually ran', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  await $.agent.spawn({ prompt: 'x', description: 'one', subagentType: 'Explore', model: 'haiku' } as never)
+  resolved = 'claude-opus-5-5'
+  await $.agent.spawn({ prompt: 'x', description: 'two', subagentType: 'general-purpose', model: 'haiku' } as never)
+  expect(await route($)).toContain('running')
+
+  await $.turn.complete(end('aone', 'claude-haiku-5-5'))
+  await $.turn.complete(end('atwo', 'claude-opus-5-5', 'error'))
+
+  const text = await route($)
+  expect(text).toContain('haiku  2 runs, 1 failed, 3.0k in / 400 out, avg 2.0s')
+  expect(text).toContain('haiku->opus')
+  expect(text).toContain('error')
+  expect(text).toContain('Explore: one')
+})
+
+test('the pane lists routed agents on every surface', async ($, on) => {
+  engine(on)
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.agent.spawn({ prompt: 'x', description: 'Design auth', subagentType: 'Plan', model: 'opus' } as never)
+  expect(await route($, 'pane')).toBe('Model routing pane opened.')
+
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'model-router',
+      component: 'Pane',
+      requestId: 'model-router',
+      surface,
+      props: {
+        title: 'Model routing',
+        isFocused: false,
+        bodyColumns: 100,
+        placement: 'dock',
+        scroll: { offset: 0, bodyRows: 20 },
+        view: {},
+      },
+    })
+    expect((await ui.find({ type: 'Text', text: /Plan: Design auth/ }))?.text).toContain('running')
+    await ui.unmount()
+  }
 })
 
 test('the policy rides only a prompt that offers the Agent tool', async ($, on) => {

@@ -4,12 +4,13 @@ A Claude Code mod that makes the main model an orchestrator: it splits work into
 
 ## How it works
 
-- **Routing rules in the system prompt.** The main model is told to set `model` on every Agent call: haiku for lookup and mechanical work, sonnet for ordinary coding, opus for design, root-causing and synthesis.
-- **Fallback router.** If the main model picks no model, or one outside those three, the mod chooses by agent type, then by keywords in the task description, and defaults to sonnet. A full model id such as `claude-haiku-5-5` is normalised to its alias. Forks keep the parent model.
-- **Workflow agents are left alone.** Agents started by a Workflow script inherit the session model on purpose, so the fallback skips them unless the script names a tier itself. The routing rules are added to a prompt only when that prompt offers the Agent tool.
-- **Feedback.** The status line shows `route: <type> -> <model>` for each spawn. `/route` prints counts per tier and the last ten tasks; a `*` marks those the fallback chose.
+- **Routing rules in the system prompt.** Wherever the Agent tool is offered, the main model is told to set `model` on every Agent call: haiku for lookup and mechanical work, sonnet for ordinary coding, opus for design, root-causing and synthesis. It is also told that a subagent sees none of the conversation, so each brief must carry the goal, paths, constraints and what to report, and to escalate a weak result one tier up.
+- **Strict: the main model always decides.** An Agent call the model makes with no model, or one outside those three (`inherit`, `fable`), is refused with the rules as the error, and the model calls again with a pick of its own. There is no guessing. This also overrides a custom agent's own `model:` frontmatter, since the main model always picks.
+- **Picks are passed on as given.** `opus[1m]` keeps its 1M context and a pinned id such as `claude-sonnet-4-5` keeps its version. Forks keep the parent model, workflow agents keep what their script chose, and spawns made by other plugins are left alone.
+- **Usage tracking.** Each routed agent is recorded with its tokens in and out, time, outcome and the model that actually answered. If that differs from the pick (a setting that forces one subagent model, or an overload fallback), a toast says so and the row shows `asked->ran`.
+- **Feedback.** The status line shows `route: 2 running (opus, haiku)` and clears when none run. `/route` prints, per tier, runs, failures, tokens and average time, then the last ten tasks. `/route pane` opens a live side panel with the same view, updated as agents start and finish.
 
-To change the policy, edit the `POLICY` text and the `BY_TYPE`, `OPUS` and `HAIKU` tables at the top of `hooks/register.ts`.
+To change the policy, edit the `POLICY` and `DENY` texts at the top of `hooks/register.tsx`.
 
 ## Install
 
