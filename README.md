@@ -6,6 +6,7 @@ A Claude Code mod that makes the main model an orchestrator: it splits work into
 
 - **Routing rules in the system prompt.** The main model is told to set `model` on every Agent call: haiku for lookup and mechanical work, sonnet for ordinary coding, opus for design, root-causing and synthesis.
 - **Fallback router.** If the main model picks no model, or one outside those three, the mod chooses by agent type, then by keywords in the task description, and defaults to sonnet. A full model id such as `claude-haiku-5-5` is normalised to its alias. Forks keep the parent model.
+- **Workflow agents are left alone.** Agents started by a Workflow script inherit the session model on purpose, so the fallback skips them unless the script names a tier itself. The routing rules are added to a prompt only when that prompt offers the Agent tool.
 - **Feedback.** The status line shows `route: <type> -> <model>` for each spawn. `/route` prints counts per tier and the last ten tasks; a `*` marks those the fallback chose.
 
 To change the policy, edit the `POLICY` text and the `BY_TYPE`, `OPUS` and `HAIKU` tables at the top of `hooks/register.ts`.

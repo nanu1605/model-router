@@ -48,6 +48,8 @@ export const register: Register = on => {
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
+    // A prompt whose request offers no Agent tool cannot delegate: skip the rules.
+    if (!e.tools.includes('Agent')) return composed
     return {
       sections: [...composed.sections, { id: 'model-router:policy', text: POLICY, scope: 'session' }],
     }
@@ -58,6 +60,10 @@ export const register: Register = on => {
     if (e.fork || e.resume) return next(e)
 
     const asked = tierOf(e.model)
+    // A workflow script's agents inherit the session model on purpose: the
+    // fallback leaves them alone and only normalises a tier the script named.
+    if (e.workflow && !asked) return next(e)
+
     const model = asked ?? fallback(e.subagentType, e.description, e.prompt)
     const ran = await next({ ...e, model })
 
