@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { Register, TurnCompleteInput } from 'claude-code'
 
 import type { Routed, Tier } from '../types'
 
@@ -15,10 +15,23 @@ Fan independent tasks out as parallel Agent calls, each with its own model. When
 
 const DENY = `model-router: this Agent call has no model. Set \`model\` to haiku (lookup, mechanical work), sonnet (code to a clear spec; the default) or opus (design, unclear bugs, high stakes), then call Agent again.`
 
+type AgentRecord = {
+  status?: string
+  agentId?: string
+  resolvedModel?: string
+  totalDurationMs?: number
+  usage?: {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number | null
+    cache_read_input_tokens: number | null
+  }
+}
+
 const PANE = 'model-router'
 const TIERS: Tier[] = ['haiku', 'sonnet', 'opus']
 
-// Classifies, never rewrites: `opus[1m]` or a pinned `claude-sonnet-4-5` goes on as given.
+// Classifies, never rewrites: the model's pick goes on to the Agent tool as given.
 const tierOf = (m?: string): Tier | undefined => TIERS.find(t => m?.toLowerCase().includes(t))
 
 const log = atom({ plugin: 'model-router', key: 'log' } as const, [] as Routed[], {
@@ -32,10 +45,27 @@ const running = (list: Routed[]) => {
 
 const kTok = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`)
 const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`
+// A model id with no tier word (a Bedrock ARN, a gateway alias) is no mismatch: only a known other tier is.
 const tierLabel = (r: Routed) => {
-  const ran = tierOf(r.ran) ?? r.ran
+  const ran = tierOf(r.ran)
   return ran && ran !== r.asked ? `${r.asked}->${ran}` : r.asked
 }
+
+// What one run of a subagent's loop adds to its row: its outcome, time, summed tokens and answering model.
+type Run = Pick<Routed, 'status' | 'ms' | 'tokIn' | 'tokOut'> & { ran?: string }
+const runOf = (e: TurnCompleteInput): Run => {
+  const u = e.usage
+  return {
+    status: e.reason === 'answer' ? 'done' : e.reason,
+    ms: e.durationMs,
+    tokIn: u ? u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens : 0,
+    tokOut: u?.output_tokens ?? 0,
+    ...(u ? { ran: u.model } : {}),
+  }
+}
+// A foreground agent's run ends before its Agent call returns, so before its row exists: it waits here.
+// ponytail: module memory, lost on a reload mid-agent; the row then falls back to the record's last response.
+const early = new Map<string, Run>()
 const row = (r: Routed) =>
   `${tierLabel(r).padEnd(12)} ${r.status.padEnd(7)} ${`${kTok(r.tokIn)}/${kTok(r.tokOut)}`.padStart(11)} ${secs(r.ms).padStart(7)}  ${r.type}: ${r.task}`
 
@@ -68,54 +98,93 @@ export const register: Register = on => {
     }
   })
 
-  on('agent.spawn', async ($, e, next) => {
-    // Forks inherit the parent model, a resume keeps its content, a workflow script chose for itself.
-    if (e.fork || e.resume || e.workflow) return next(e)
+  // The model's own Agent calls only: workflow scripts and other plugins spawn through
+  // agent.spawn, which this mod leaves alone, and a fork always inherits the parent model.
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    if (e.subagent_type === 'fork' || next.origin.plugin !== 'engine') return next(e)
 
     const asked = tierOf(e.model)
-    // The main model's own calls are held to the rule; another plugin's spawn is that plugin's business.
-    if (!asked && next.origin.plugin === 'engine') return { deny: DENY }
+    if (!asked) return { deny: DENY }
 
     const ran = await next(e)
-    if (!asked || ran.deny !== undefined || !ran.agentId) return ran
+    if (ran.deny !== undefined) return ran
 
-    const routed: Routed = {
-      id: ran.agentId,
-      type: e.subagentType,
-      task: (e.description || e.prompt).slice(0, 60),
+    const base = {
+      type: e.subagent_type ?? 'general-purpose',
+      task: e.description.slice(0, 60),
       asked,
-      ran: ran.model,
-      status: 'running',
       ms: 0,
       tokIn: 0,
       tokOut: 0,
     }
+    // Every arm of the Agent tool's record, read through the fields this mod uses.
+    const r: AgentRecord | undefined = ran.isError ? undefined : ran.result
+    let routed: Routed
+    if (ran.isError) {
+      routed = { ...base, id: e.tool_use_id, status: 'error' }
+    } else if (r?.agentId) {
+      // Background, foreground or teammate; a remote launch has no local agent and no id.
+      const run = early.get(r.agentId)
+      early.delete(r.agentId)
+      const u = r.usage
+      const record: Run | undefined =
+        r.status === 'completed' && u
+          ? {
+              status: 'done',
+              ms: r.totalDurationMs ?? 0,
+              tokIn: u.input_tokens + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
+              tokOut: u.output_tokens,
+            }
+          : undefined
+      routed = { ...base, id: r.agentId, ran: r.resolvedModel, status: 'running', ...(run ?? record) }
+    } else {
+      return ran
+    }
+
     const list = await update($, log, l => [...l, routed].slice(-50))
-    if (ran.model && tierOf(ran.model) !== asked) {
-      $.ui.toast(`model-router: asked ${asked}, runs ${ran.model}. A setting may force the subagent model.`)
+    const ranTier = tierOf(routed.ran)
+    if (ranTier && ranTier !== asked) {
+      $.ui.toast(`model-router: asked ${asked}, ran ${routed.ran}. A setting may force the subagent model.`)
     }
     $.ui.status(running(list))
     return ran
   })
 
+  // A resumed agent or a teammate taking its next turn is running again.
+  on('turn.start', async ($, e, next) => {
+    const started = await next(e)
+    const id = e.agentId
+    if (!id || !(await read($, log)).some(r => r.id === id && r.status !== 'running')) return started
+
+    const list = await update($, log, l => l.map(r => (r.id === id ? { ...r, status: 'running' } : r)))
+    $.ui.status(running(list))
+    return started
+  })
+
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     const id = e.agentId
-    if (!id || !(await read($, log)).some(r => r.id === id)) return done
+    if (!id) return done
 
-    const u = e.usage
+    const run = runOf(e)
+    if (!(await read($, log)).some(r => r.id === id)) {
+      early.set(id, run)
+      if (early.size > 50) early.delete(early.keys().next().value as string)
+      return done
+    }
+
     const list = await update($, log, l =>
       l.map(r =>
         r.id !== id
           ? r
           : {
               ...r,
-              status: e.reason === 'answer' ? 'done' : e.reason,
-              ran: u?.model ?? r.ran,
-              // A resumed agent completes again: its runs add up.
-              ms: r.ms + e.durationMs,
-              tokIn: r.tokIn + (u ? u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens : 0),
-              tokOut: r.tokOut + (u?.output_tokens ?? 0),
+              status: run.status,
+              ran: run.ran ?? r.ran,
+              // A resumed agent or a teammate completes again: its runs add up.
+              ms: r.ms + run.ms,
+              tokIn: r.tokIn + run.tokIn,
+              tokOut: r.tokOut + run.tokOut,
             },
       ),
     )

@@ -1,16 +1,49 @@
 import { expect, test } from 'claude-code/testing'
-import type { TestBody } from 'claude-code/testing'
+import type { Engine, TestBody } from 'claude-code/testing'
 
-// Nothing sits beneath the plugin: this hook stands for the engine. It resolves
-// a spawn to the model it was handed, or to `resolved` when the test forces one.
+// Nothing sits beneath the plugin: these hooks stand for the engine. An Agent
+// call launches in the background, or, with `foreground` set, runs to its end.
 let resolved: string | undefined
+let foreground = false
 const engine = (on: Parameters<TestBody>[1]) => {
   resolved = undefined
-  on('agent.spawn', (_, e) => ({ model: resolved ?? e.model ?? 'inherit', agentId: `a${e.description}` }))
+  foreground = false
+  on('tool.call', (_, e) => {
+    const call = e as unknown as { description: string; prompt: string; model?: string; name?: string }
+    const model = resolved ?? `claude-${call.model}-5-5`
+    // A completed record's usage is its last response alone: kept small so a test tells it from a summed run.
+    const result = call.name
+      ? { status: 'teammate_spawned', agentId: `a${call.description}`, agent_id: `a${call.description}`, name: call.name }
+      : foreground
+      ? {
+          status: 'completed',
+          agentId: `a${call.description}`,
+          resolvedModel: model,
+          content: [],
+          prompt: call.prompt,
+          totalToolUseCount: 0,
+          totalDurationMs: 9000,
+          totalTokens: 15,
+          usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: null, cache_read_input_tokens: 0 },
+        }
+      : {
+          status: 'async_launched',
+          agentId: `a${call.description}`,
+          description: call.description,
+          resolvedModel: model,
+          prompt: call.prompt,
+          outputFile: '',
+        }
+    return { result } as never
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'route' } }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
 }
+
+const agent = ($: Engine, input: object) =>
+  $.tool.call({ tool: 'Agent', prompt: 'x', description: 'task', ...input } as never)
 
 const end = (agentId: string, model: string, reason = 'answer') =>
   ({
@@ -23,40 +56,27 @@ const end = (agentId: string, model: string, reason = 'answer') =>
     usage: { input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 500, model },
   }) as never
 
-const route = async ($: { command: { run: (e: never) => Promise<{ text?: string }> } }, args = '') =>
+const route = async ($: Engine, args = '') =>
   (await $.command.run({ command: 'route', args, origin: { kind: 'composer' } } as never)).text ?? ''
 
-test('the main model must pick a tier; a valid pick goes on as given', async ($, on) => {
+test('the main model must pick a tier; a fork and a valid pick go on', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  const spawn = (input: object) => $.agent.spawn({ prompt: 'x', description: '1', ...input } as never)
 
-  expect((await spawn({})).deny).toContain('model-router: this Agent call has no model')
-  expect((await spawn({ model: 'fable' })).deny).toContain('haiku')
-  expect((await spawn({ model: 'inherit' })).deny).toBeDefined()
+  expect((await agent($, {})).deny).toContain('model-router: this Agent call has no model')
+  expect((await agent($, { model: 'fable' })).deny).toContain('haiku')
 
-  expect((await spawn({ model: 'haiku' })).model).toBe('haiku')
-  expect((await spawn({ model: 'opus[1m]' })).model).toBe('opus[1m]')
-  expect((await spawn({ model: 'claude-sonnet-4-5' })).model).toBe('claude-sonnet-4-5')
-})
-
-test('a workflow agent goes on untouched', async ($, on) => {
-  engine(on)
-  const workflow = { runId: 'wf_test', agentIndex: 1 }
-  const spawn = async (input: object) =>
-    (await $.agent.spawn({ prompt: 'x', workflow, ...input } as never)).model
-
-  expect(await spawn({})).toBe('inherit')
-  expect(await spawn({ model: 'claude-opus-5-5' })).toBe('claude-opus-5-5')
+  expect((await agent($, { model: 'haiku' })).deny).toBeUndefined()
+  expect((await agent($, { subagent_type: 'fork' })).deny).toBeUndefined()
 })
 
 test('/route reports usage, outcome and the model that actually ran', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
-  await $.agent.spawn({ prompt: 'x', description: 'one', subagentType: 'Explore', model: 'haiku' } as never)
+  await agent($, { description: 'one', subagent_type: 'Explore', model: 'haiku' })
   resolved = 'claude-opus-5-5'
-  await $.agent.spawn({ prompt: 'x', description: 'two', subagentType: 'general-purpose', model: 'haiku' } as never)
+  await agent($, { description: 'two', model: 'haiku' })
   expect(await route($)).toContain('running')
 
   await $.turn.complete(end('aone', 'claude-haiku-5-5'))
@@ -67,13 +87,55 @@ test('/route reports usage, outcome and the model that actually ran', async ($, 
   expect(text).toContain('haiku->opus')
   expect(text).toContain('error')
   expect(text).toContain('Explore: one')
+  expect(text).toContain('general-purpose: two')
+})
+
+test('a foreground agent takes its summed run, which ends before its call returns', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  foreground = true
+
+  await $.turn.complete(end('areview', 'claude-sonnet-5-5', 'error'))
+  await agent($, { description: 'review', model: 'sonnet' })
+  // With no run heard, the record stands in.
+  await agent($, { description: 'lint', model: 'haiku' })
+
+  const text = await route($)
+  expect(text).toContain('sonnet 1 runs, 1 failed, 1.5k in / 200 out, avg 2.0s')
+  expect(text).toContain('haiku  1 runs, 0 failed, 10 in / 5 out, avg 9.0s')
+})
+
+test('a teammate and a resumed agent run again on each turn', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  await agent($, { description: 'mate', name: 'scout', model: 'haiku' })
+  expect(await route($)).toContain('haiku        running')
+
+  await $.turn.complete(end('amate', 'claude-haiku-5-5'))
+  expect(await route($)).toContain('haiku        done')
+
+  await $.turn.start({ agentId: 'amate', text: 'next', turnId: 't2' } as never)
+  expect(await route($)).toContain('haiku        running')
+  await $.turn.complete(end('amate', 'claude-haiku-5-5'))
+  expect(await route($)).toContain('3.0k/400')
+})
+
+test('a model id with no tier word is no mismatch', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  resolved = 'arn:aws:bedrock:us-east-1:123:application-inference-profile/x'
+
+  await agent($, { description: 'arn', model: 'opus' })
+
+  expect(await route($)).not.toContain('->')
 })
 
 test('the pane lists routed agents on every surface', async ($, on) => {
   engine(on)
   on('ui.open', () => ({ value: { isPlaced: true } }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await $.agent.spawn({ prompt: 'x', description: 'Design auth', subagentType: 'Plan', model: 'opus' } as never)
+  await agent($, { description: 'Design auth', subagent_type: 'Plan', model: 'opus' })
   expect(await route($, 'pane')).toBe('Model routing pane opened.')
 
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {

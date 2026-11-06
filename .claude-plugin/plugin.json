@@ -1,6 +1,9 @@
 {
   "name": "model-router",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Main model delegates each task to a subagent and picks its model: haiku, sonnet or opus.",
+  "author": { "name": "nanu1605" },
+  "license": "MIT",
+  "repository": "https://github.com/nanu1605/model-router",
   "types": "./types/index.d.ts"
 }

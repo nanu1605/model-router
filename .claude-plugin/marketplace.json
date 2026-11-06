@@ -1,5 +1,6 @@
 {
   "name": "model-router",
   "owner": { "name": "nanu1605" },
+  "description": "model-router: the main model delegates each task to a subagent and picks haiku, sonnet or opus for it.",
   "plugins": [{ "name": "model-router", "source": "./" }]
 }
