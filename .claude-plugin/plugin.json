@@ -1,0 +1,6 @@
+{
+  "name": "model-router",
+  "version": "0.1.0",
+  "description": "Main model delegates each task to a subagent and picks its model: haiku, sonnet or opus.",
+  "types": "./types/index.d.ts"
+}
