@@ -98,8 +98,8 @@ export const register: Register = on => {
     }
   })
 
-  // The model's own Agent calls only: workflow scripts and other plugins spawn through
-  // agent.spawn, which this mod leaves alone, and a fork always inherits the parent model.
+  // The model's own Agent calls only: agents a workflow script or another plugin starts are
+  // left alone, and a fork always inherits the parent model.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     if (e.subagent_type === 'fork' || next.origin.plugin !== 'engine') return next(e)
 
