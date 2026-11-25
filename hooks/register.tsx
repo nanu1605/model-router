@@ -299,7 +299,7 @@ export const register: Register = on => {
     const list = await update($, log, l => cap([...l, routed]))
     const ranTier = tierOf(routed.ran)
     if (ranTier && ranTier !== asked) {
-      $.ui.toast(`model-router: asked ${asked}, ran ${routed.ran}. A setting may force the subagent model.`)
+      $.ui.toast(`Asked ${asked}, ran ${routed.ran}. A setting may force the subagent model.`)
     }
     $.ui.status(running(list))
     return ran
@@ -319,13 +319,13 @@ export const register: Register = on => {
       turn.raised = true
       const id = turn.id
       list = await update($, log, l => l.map(r => (r.id === id ? { ...r, ran: 'opus' } : r)))
-      $.ui.toast(`model-router: this turn changes files, so it moves from ${model} to the latest opus.`)
+      $.ui.toast(`This turn changes files, so it moves from ${model} to the latest opus.`)
     } else {
       raised.add(e.agentId)
       if (raised.size > 200) raised.delete(raised.values().next().value as string)
       const id = e.agentId
       list = await update($, log, l => l.map(r => (r.id === id ? { ...r, ran: 'opus' } : r)))
-      $.ui.toast(`model-router: an agent on ${model} tried to change files; it moves to the latest opus.`)
+      $.ui.toast(`An agent on ${model} tried to change files; it moves to the latest opus.`)
     }
     $.ui.status(running(list))
     return writeDeny(e)

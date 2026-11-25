@@ -13,6 +13,7 @@ let foreground = false
 let picked = 'haiku'
 let sent: string[] = []
 let prompts: string[] = []
+let toasts: string[] = []
 let usage: object | null = null
 let context = 20_000
 let clock: MockClock
@@ -22,6 +23,7 @@ const engine = (on: Parameters<TestBody>[1]) => {
   picked = 'haiku'
   sent = []
   prompts = []
+  toasts = []
   usage = null
   context = 20_000
   mock.store(on)
@@ -31,7 +33,10 @@ const engine = (on: Parameters<TestBody>[1]) => {
   on('session.end', () => ({ sessionId: 's' }) as never)
   on('prompt.submit', (_, e) => ({ text: e.text }) as never)
   on('ui.status', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('model.complete', (_, e) => {
     prompts.push(String(e.prompt))
     return {
@@ -277,6 +282,8 @@ test('a shell command that may change files counts as a write', async ($, on) =>
     'find . -name "*.ts" 2>&1 | head',
     'for f in *.ts; do head -1 $f; done',
     'gh pr view 12',
+    'graphify query "where is the parser" 2>&1 | head -40',
+    "awk 'NR>=10 && NR<=20' a.sql | grep -n x",
   ]
   for (const command of reads) expect(await call($, { tool: 'Bash', command })).toBeUndefined()
   expect(await call($, { tool: 'PowerShell', command: 'Get-ChildItem -Recurse | Select-Object Name' })).toBeUndefined()
@@ -288,7 +295,7 @@ test('a shell command that may change files counts as a write', async ($, on) =>
     'npm install',
     'find . -name x -delete',
     'ls && rm -rf x',
-    'cat $(which x)',
+    'cat $(rm -rf x)',
     `awk '{print > "o"}' f`,
     'Get-Content a | Set-Content b',
   ]
@@ -304,6 +311,8 @@ test('an agent that writes moves to opus for its later steps', async ($, on) => 
   await step($, { turnId: 'ta', index: 0, model: 'claude-sonnet-5-5', agentId: 'awork' })
   expect(await call($, { tool: 'Read', file_path: 'a.ts', agentId: 'awork' })).toBeUndefined()
   expect(await call($, { ...edit, agentId: 'awork' })).toContain('This agent now continues on opus')
+  // The engine shows a toast under the mod's name, so the text does not repeat it.
+  expect(toasts).toEqual(['An agent on claude-sonnet-5-5 tried to change files; it moves to the latest opus.'])
   await step($, { turnId: 'ta', index: 1, model: 'claude-sonnet-5-5', agentId: 'awork' })
   expect(sent).toEqual(['awork:claude-sonnet-5-5', 'awork:opus'])
   expect(await call($, { ...edit, agentId: 'awork' })).toBeUndefined()
@@ -359,6 +368,61 @@ test('the shell classifier reads commands as each shell does', () => {
     'LC_ALL=C sort names.txt',
     'gh pr view 12',
     'x=1',
+    // graphify's queries, as a CLAUDE.md asks for them first.
+    'graphify query "where is the parser" 2>&1 | head -40',
+    'graphify path "Parser" "Lexer" --graph out/graph.json',
+    'graphify explain "Router" --budget 500',
+    // Outside print, > in awk compares and || is a logical or.
+    "awk 'NR>=10 && NR<=20' a.sql | grep -n x",
+    "awk '{ if (length($0) > 100) print length($0)\": \"$0 }' a.md",
+    "awk -F: '$1>=371' notes.txt",
+    String.raw`awk '/^8\. /{f=1} f{print NR": "$0} /^9\. /{if(f&&NR>1)exit}' a.md`,
+    `awk '$1=="a" || $1=="b"' f`,
+    "awk '/a|b>c/' f",
+    "awk 'length>100{print FILENAME\": \"FNR}' a.sh b.sh",
+    "for f in *.md; do awk 'length>100' $f; done",
+    // Listings, and remote refs.
+    'git ls-remote --heads origin',
+    "git branch --list 'fix/*' 'feat/*'",
+    "git branch --format='%(refname:short) %(objectname:short)'",
+    'git tag --sort=-creatordate | head -5',
+    "gh api repos/o/r/releases --paginate --jq '.[].tag_name' | head -c 6000",
+    'gh api -X GET repos/o/r/pulls',
+    'for n in 3 2 1; do gh pr view $n --repo $R --json files; gh pr checks $n --repo $R; done',
+    'for p in a b; do npm view $p time --json; done',
+    // A substitution whose command reads hands its output on as a word.
+    'f=$(find src -name "*.js" | head -1); echo $f; cat $f | head',
+    'cd a 2>/dev/null || cd $(dirname $(readlink -f b))/dist; pwd; cat x.js',
+    'd=$(ls -d lib/*/core | head -3); for x in $d; do grep -n tunnel $x/a.js; done',
+    'echo "files: $(git ls-files | wc -l)"',
+    "echo \"$(echo ')')\"",
+    'diff <(git show HEAD:a.ts) a.ts',
+    'cat $(which x)',
+    'grep -c "x$" f',
+    String.raw`grep -v "^[+-]   \(IFS\|\`\)" f`,
+    // Tests, settings and variables that stay reads.
+    '[ -f "$f" ] && cat "$f"',
+    '[ "$a" = "$b" ] || echo differ',
+    '[[ -n $x && $x == a* ]] && echo yes',
+    '[[ 3 -gt 2 ]] && ls',
+    'set -euo pipefail; ls',
+    'S=/tmp/out; ls $S',
+    'echo "${HOME}/x ${f%.ts} ${#list[@]} ${x:-none}"',
+    'local n=1; readonly k=2',
+    'export LC_ALL=C; sort a',
+    "printf '%s\\n' a b",
+    'git config --get user.name',
+    'git config list',
+    'git reflog -5',
+    'uniq -c in.txt',
+    'xxd -l 64 in.bin',
+    'ls >&2 2>&1',
+    '! grep -q x f && echo none',
+    'if [[ -f a ]]; then cat a; fi',
+    'git --no-pager log -1',
+    'echo ${x:-default}',
+    `awk 'BEGIN { if (1) print "a" }'`,
+    `awk '{ n = $1 / 2; print n }' f`,
   ]
   for (const command of bashReads) expect([command, mayWrite(command, 'bash')]).toEqual([command, false])
 
@@ -376,10 +440,170 @@ test('the shell classifier reads commands as each shell does', () => {
     'find . -name x -delete',
     'find . -fprint0 out.txt',
     'ls && rm -rf x',
-    'cat $(which x)',
-    'cat "$(which x)"',
+    'cat $(rm -rf x)',
+    'cat "$(touch x)"',
+    'echo "$(echo a; rm -rf x)"',
+    'echo $(cat <<EOF\n)\nEOF\n)',
+    'echo $(case x in a) rm -rf y;; esac)',
+    'echo $(echo # )\nrm -rf x)',
+    'echo $((1 + 2))',
+    'diff >(cat) a',
+    // A word the shell expands is not what a checked reader sees.
+    'X=-delete; find . $X',
+    'for o in -delete; do find . $o; done',
+    'find . "$X"',
+    'find . {-delete,-print}',
+    'find . -{delete,print}',
+    String.raw`find . $'\x2ddelete'`,
+    'find . $"-delete"',
+    'find . -d*',
+    'sed -n 1p *',
+    'git log $(echo --output=a.ts)',
+    'git log $X',
+    'sort $o a.ts in.txt',
+    'uniq $f',
+    'sed -n "$(grep -n x f | cut -d: -f1),+5p" f',
+    'awk -v $x "{print}" f',
+    // awk that writes, loads or runs code.
     `awk '{print > "o"}' f`,
     `awk 'BEGIN{system("rm -rf src")}'`,
+    `awk 'NR>1 {print | "sh"}' f`,
+    `awk '{printf "%s", $0 >> "log"}' f`,
+    `awk '{print > ENVIRON["F"]}' f`,
+    `awk 'BEGIN{"date" | getline d}'`,
+    `gawk '@load "x"; {print}' f`,
+    `awk 'BEGIN{f="system"; @f("rm x")}'`,
+    "gawk -d '{print}' f",
+    "gawk -p '{print}' f",
+    "awk -e 'BEGIN{}' f",
+    "awk -f prog.awk f",
+    `awk '/[/]/ {print > "o"}' f`,
+    // The new readers stop at what they cannot vouch for.
+    'graphify update .',
+    'graphify query x --out f',
+    'gh api -X POST repos/o/r/issues',
+    'gh api repos/o/r/issues -f title=x',
+    'gh api graphql -F query=@q.graphql',
+    'gh api --input body.json repos/o/r/issues',
+    'gh api --method=PATCH repos/o/r',
+    'gh api $endpoint',
+    'npm run build',
+    'npm --prefix x view y',
+    'git branch new-feature',
+    'git branch --format=%x new-feature',
+    'git tag v1.0',
+    'git tag --sort=x v1.0',
+    "git ls-remote --upload-pack='rm -rf x' origin",
+    "git ls-remote 'ext::sh -c x'",
+    // Variables the shell runs as code, and ways to export one to a reader.
+    "PS4='$(touch m) '; set -x; true",
+    'set -o xtrace; ls',
+    "set -a; GIT_EXTERNAL_DIFF='touch m;:'; git diff",
+    "GIT_EXTERNAL_DIFF='touch m;:'; export GIT_EXTERNAL_DIFF; git diff",
+    'set -k; git diff GIT_EXTERNAL_DIFF=x',
+    // Arithmetic, which runs a $( ) in an array subscript.
+    "[[ 'a[$(touch m)]' -eq 0 ]]",
+    "x='a[$(touch m)]'; [[ $x -eq 0 ]]",
+    "x='a[$(touch m)]'; echo $[x]",
+    "x='a[$(touch m)]'; echo ${!x}",
+    "x='a[$(touch m)]'; echo ${x:x}",
+    "x='b[$(touch m)]'; echo ${a[x]}",
+    "printf -v 'a[$(touch m)]' x",
+    "declare 'a[$(touch m)]=1'",
+    "declare -i n='a[$(touch m)]'",
+    "[[ -v 'a[$(touch m)]' ]]",
+    "test -v 'a[$(touch m)]'",
+    `op=-v; [ "$op" 'a[$(touch m)]' ]`,
+    "[[ x && cat -eq 'a[$(touch m)]' ]]",
+    `[[ x == "]]" && cat -eq $y ]]`,
+    // Descriptors, comments and carriage returns as bash reads them.
+    'echo hi >&marker',
+    'echo hi >& marker',
+    'cat <&0#; touch m',
+    'ls >&1#; touch m',
+    'echo x >/dev/null{x}',
+    `echo "\${x:-"'"}"\ntouch m\n#'`,
+    'true\r# ; touch m',
+    "echo $( (true)#)'\ntouch m\n#'\n)",
+    // awk that hides its writes from a careless reading.
+    `awk 'BEGIN { x = -/#/; print "a" > "m" }'`,
+    `awk 'BEGIN { x = /[]/#]/; print 1 > "m" }'`,
+    `awk 'BEGIN { print "a" \\\n > "m" }'`,
+    `awk 'BEGIN { print "a",\n"b" > "m" }'`,
+    `awk 'BEGIN { print "a" &&\n 1 > "m" }'`,
+    `awk 'BEGIN { x = 4 \\\n/ 2; print 1 > "m"; y = 1 / 1 }'`,
+    `awk 'BEGIN { x = (1) / 2; print 1 > "m"; y = 1 / 1 }'`,
+    `awk '{ if (1) /"/; print > "m"; y = "/" }'`,
+    `awk 'BEGIN { system \\\n("touch m") }'`,
+    // Options a program takes by a shorter name, and operands that are outputs.
+    "git config core.fsmonitor 'touch m' get; git status",
+    String.raw`sed -n '/\|\/,/e touch m #/' in.txt`,
+    "git grep --open='touch m' b",
+    'git log --outp=a.ts',
+    'sort --o=out in.txt',
+    'sort --compress-prog=sh in.txt',
+    'git reflog drop --all',
+    'git reflog write HEAD a b msg',
+    'echo x | uniq - 5',
+    'printf hi | uniq -- - -umark',
+    'xxd in.txt 7',
+    'date --se=2020-01-01',
+    'file --comp x',
+    // A quoted keyword is a command name, so [[ after it is an argument.
+    "'!' [[ x || touch m",
+    "'!' [[\ntouch m",
+    '"if" [[ x || echo pwned > m',
+    "'time' [[ || touch m ]]",
+    // Substitutions and arithmetic in other places.
+    'echo ${x:-<(touch m)}',
+    'echo ${x:->(touch m)}',
+    'y=${x:-<(touch m)}',
+    "declare -a 'a=($(touch m))'",
+    "declare -A 'h=([$(touch m)]=1)'",
+    "declare 'a=($(touch m))'",
+    "unset 'HOME[$(touch m)]'",
+    "unset -v 'HOME[$(touch m)]'",
+    "true='a[$(touch m)]'; ((true))",
+    "false='a[$(touch m)]'; for ((false;false;)); do :; done",
+    `x='a[$(touch m)]'; cat <<< "\${x:x}"`,
+    "x='b[$(touch m)]'; cat < ${a[x]}",
+    "x='a[$(touch m)]'; cat < $[x]",
+    "x='b[$(touch m)]'; ls {a[x]}>/dev/null",
+    // Options that change what the program runs.
+    'tree -R -L 1 -H . src',
+    'git --shallow-file log rm -q a.txt',
+    'git --attr-source log rm a.txt',
+    "git grep -iO'touch m' hello",
+    'rg --hostname-bin=./scripts/build --hyperlink-format=default x',
+    // awk comments, keywords and divisions read as awk does.
+    `awk 'BEGIN { x = 1 # \\\nprint "touch m" | "sh" }'`,
+    `awk 'BEGIN { x = 1 # \\\nprint 1 > "m" }'`,
+    `awk 'BEGIN { exit /#/ } END { print "touch m" | "sh" }'`,
+    `awk 'BEGIN { print /#/ /1 > "m"; y = 1/2 }'`,
+    `awk 'BEGIN { a = 2; print $0 ~ /;/, (a)/1 > "m"; x = 1/2 }'`,
+    // A redirect first, or a pipe, makes [[ and time plain command names.
+    '>/dev/null [[ x || touch m ]]',
+    'ls | time [[ x || touch m ]]',
+    '[[ -n <(touch m) ]]',
+    '[[ -n >(touch m) ]]',
+    // ~- and ~+ are $OLDPWD and $PWD; integer variables evaluate what they get.
+    `OLDPWD='BEGIN{system("touch m")}'; awk ~-`,
+    "OLDPWD=-om; sort ~- in.txt",
+    "PWD='-va[$(touch m)]'; printf ~+ x",
+    "RANDOM='a[$(touch m)]'",
+    "for RANDOM in 'a[$(touch m)]'; do :; done",
+    "x=(ls ['a[$(touch m)]']=1)",
+    'x=([[ <(touch m) ]])',
+    'set -- 1; for x do touch m; done',
+    // Redirect words and descriptors as bash reads them.
+    String.raw`cat < "a\" ' $(touch m) ' " #"`,
+    'uniq in.txt 99999999999999999999>/dev/null',
+    // sed with a backslash for delimiter, awk with joined lines or another awk's keywords.
+    String.raw`echo 'touch m' | sed 's\t\t\e#\'`,
+    String.raw`echo a | sed 's\a\b\w .\m'`,
+    `awk 'BEGIN { x = "touch m"; print\\\nx | "sh" }'`,
+    `awk 'BEGIN { print\\\nx > "m" }'`,
+    `awk --traditional 'BEGIN { case = 4; c = "touch m"; if ("q" ~ /"/) k = 1; n = case / 2; print c | "sh"; y = 1 / 1; if ("q" ~ /"/) k = 2 }'`,
     'sort -o a.ts in.txt',
     'uniq in.txt out.txt',
     'xxd -r patch.hex bin/app',
@@ -404,6 +628,21 @@ test('the shell classifier reads commands as each shell does', () => {
     '$x = Get-Item a.ts',
     "Select-String -Path *.ts -Pattern 'x > y'",
     'git status; git log -5',
+    'graphify query "where is the parser"',
+    'git ls-remote --heads origin',
+    'Get-ChildItem $dir | Select-Object Name',
+    'if ($x -eq 1) { Get-Item a }',
+    'foreach ($f in Get-ChildItem) { $f.Name }',
+    '[int]$n = 5',
+    '$global:n = 1',
+    "'{0} files' -f $n",
+    'exit 0',
+    'Get-ChildItem | ForEach-Object -Process { $_.Name }',
+    'Get-ChildItem\r\nGet-Location',
+    'Get-ChildItem | sort -Property Length -Descending',
+    'Get-ChildItem | Sort-Object Length',
+    '$i++',
+    '[int[]]$a = 1, 2',
   ]
   for (const command of pwshReads) expect([command, mayWrite(command, 'pwsh')]).toEqual([command, false])
 
@@ -421,6 +660,67 @@ test('the shell classifier reads commands as each shell does', () => {
     'echo code >$null"src/a.ts"',
     'Get-Content a > b',
     '. ./setup.ps1',
+    // A variable, a splat or a sub-expression is not what git sees.
+    "$o = '--output=a.ts'; git log $o",
+    'git log $(Write-Output --output=a.ts)',
+    'git log (Write-Output --output=a.ts)',
+    'git log @a',
+    'git log "--output=$f"',
+    // Calls, dot-sourcing and assignments that run code.
+    "$null = & 'Remove-Item' victim",
+    ".'Remove-Item' victim",
+    "$c:marker = 'x'",
+    "$function:git = 'Remove-Item x'; git status",
+    "$env:GIT_EXTERNAL_DIFF = 'x'; git diff",
+    '[int]$x = Remove-Item victim',
+    'return Remove-Item victim',
+    '$a, $b = Remove-Item victim',
+    '$f = Get-Item x; $f.IsReadOnly = $true',
+    'foreach ($f in Remove-Item victim) { }',
+    "(Get-Item victim).'Delete'()",
+    "[IO.File]::'WriteAllText'('a', 'b')",
+    'Get-Item victim | foreach Delete',
+    'Get-ChildItem &',
+    // Characters PowerShell reads as quotes, dashes, blanks and line ends.
+    'Get-ChildItem\rRemove-Item victim',
+    'echo "a” ; Remove-Item victim ; echo “b"',
+    "echo 'a’ ; Remove-Item victim ; echo ‘b'",
+    'git log -1 HEAD --output=marker',
+    'git log -1 HEAD\f--output=marker',
+    'git log -1 HEAD ––output=marker',
+    "$env:X = '--output=m'; git log -1 --% %X%",
+    // Quotes glued to a name, piped foreach, casts that construct, and stepped variables.
+    "New-Item'' -Path marker",
+    "Remove-Item'' x",
+    "Get-Item victim | foreach ('Delete')",
+    "[IO.StreamWriter]'marker'",
+    "$w = [IO.StreamWriter]'marker'",
+    "'marker' -as [IO.StreamWriter]",
+    '$c:marker++',
+    '++$c:marker',
+    "Get-ChildItem > '$null'",
+    'sort -o marker in.txt',
+    'Get-ChildItem | sort -Top 5',
+    // An operator glued to its right side, paths that run programs, a glued here-string.
+    '$x =Remove-Item victim',
+    "$c:marker ='x'",
+    '$f.IsReadOnly =$true',
+    '.git/../../../Windows/System32/cmd.exe /c "type nul > m"',
+    '1\\..\\..\\Windows\\System32\\cmd.exe /c "type nul > m"',
+    "Write-Output 1,@'\n'\n'@; Remove-Item victim #'",
+    // Arguments Windows PowerShell passes to a program as other words.
+    "git --namespace '' log rm -q victim",
+    `git log -1 '--x\\" --output=marker'`,
+    // Conversions that construct, spaced types, spaced steps.
+    "'marker' -as 'IO.StreamWriter'",
+    '\'marker\' -as "System.IO.StreamWriter"',
+    "'m2' -as [ IO.StreamWriter]",
+    "$null = 1, [ IO.StreamWriter]'m4'",
+    "$null = 1, 'm'-as'IO.StreamWriter'",
+    '$c:marker ++',
+    '$c:marker --',
+    '[int]$c:m1++',
+    '-$c:m2++',
   ]
   for (const command of pwshWrites) expect([command, mayWrite(command, 'pwsh')]).toEqual([command, true])
 })

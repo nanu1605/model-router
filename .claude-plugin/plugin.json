@@ -1,6 +1,6 @@
 {
   "name": "model-router",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Runs each turn and each delegated task on haiku, sonnet or opus as the work needs; only the latest opus writes code.",
   "author": { "name": "nanu1605" },
   "license": "MIT",
